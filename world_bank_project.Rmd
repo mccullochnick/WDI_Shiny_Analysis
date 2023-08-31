@@ -1,0 +1,887 @@
+---
+title: "world_bank_project"
+author: "Nick McCulloch, Cody Meagher, Stefano Musetti"
+date: "2023-06-23"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE, }
+knitr::opts_chunk$set(echo = TRUE)
+
+options(scipen = 100, digits = 4)
+```
+
+# introduction and set up
+
+**Research Question** What is the relationship between education and a country's economy (gdp)
+
+**hypothesis** Education has a positive correlation with GDP
+
+## packages
+
+```{r}
+
+library(pacman)
+
+pacman::p_load(readr, dplyr, tidyverse, data.table, knitr, lmtest, lubridate, ggplot2, gridExtra, shiny, sf, ggmap, maps, mapdata)
+
+# packages considered but not used
+#fpp2, zoo, pscl
+```
+
+## data source
+
+Data was provided by the world bank, World Development Indicators-DataBank. Specific fields of interest were selected and pulled for all countries and regions for years 1960-2022.
+
+[World Bank Site](https://databank.worldbank.org/source/world-development-indicators)
+
+## loading data
+
+```{r message=FALSE}
+#wb1 <- read_csv("wb.csv", na = "NA")
+
+wb1 <- fread("wb.csv", header = TRUE, na.strings = '"NA"')
+
+#wb_nums <- wb1[,3:65]
+
+#wb2<- unique(wb_nums$`1960`)
+
+sapply(wb1, class)
+
+summary_wb1 <- summary(wb1)
+
+wdi_econ_only <- fread("WDI_econ_only.csv", header = TRUE)
+
+#used later on
+cols4swap <- read_csv("wb_cols4swap.csv")
+
+# used later on
+new_countries <- read_csv("country_list_no_regions.csv")
+```
+
+# pre-processing and cleaning
+
+## transforming data - pivots
+
+```{r}
+#str(wb)
+
+colnames_wb1 <- colnames(wb1)
+
+colnames_wb1 <- colnames_wb1[3:65]
+
+wb2 <- wb1 %>%
+  pivot_longer(cols = all_of(colnames_wb1), names_to = "year", values_to = "stats")
+
+str(wb2)
+
+wb3 <- wb2
+
+wb3$year <- as.numeric(wb3$year)
+
+wb <- wb3
+
+rm("wb1","wb2","wb3")
+
+wbdt <- data.table(wb)
+
+# sanity check
+all.equal(wbdt,wb, check.attributes = FALSE)
+
+# changing colnames
+colnames(wbdt) <- c("country","series","year","stats")
+
+#sanity check
+sanity_check <- wb[wb$`Series Name` == "GDP (constant 2015 US$)" & wb$`Country Name` == "Somalia",]
+rm(sanity_check)
+rm(wb)
+
+```
+
+## extracting info
+
+```{r}
+
+series_list <- unique(wbdt$series)
+
+years <- unique(wbdt$year)
+```
+
+## reducing string size for series
+
+```{r}
+length(series_list)
+
+#cols4swap <- read_csv("wb_cols4swap.csv")
+
+cols4swap$og_cols[38]
+series_list[39]
+
+for(i in 1:length(cols4swap$og_cols)){
+  wbdt[series == cols4swap$og_cols[i],series := cols4swap$new_cols[i]]
+}
+```
+
+## checking NA's
+
+```{r}
+summary(wbdt$series[wbdt$series == "literacy_af"])
+
+paste("total # NAs literacy_af:",sum(is.na(wbdt[wbdt$series == "literacy_af",])))
+
+summary(wbdt$series[wbdt$series == "gdp_constant"])
+
+paste("total # NAs gdp_constant:",sum(is.na(wbdt[wbdt$series == "gdp_constant",])))
+
+#wbdt[series == "Literacy rate, adult female (% of females ages 15 and above)",series := "literacy_AF"]
+```
+
+## pivoting table
+
+```{r}
+names_list <- cols4swap$new_cols
+
+#wbdtb<-wbdt
+
+#wbdt<-wbdtb
+
+# data check
+temp <- {wbdt} %>%
+  group_by(country, year, series) %>%
+  summarise(n = n(), .groups = "drop")
+
+rm(temp)
+
+# dropping blank rows
+wbdt <- wbdt %>%
+  filter(year != "" | country != "")
+
+wbdt <- wbdt %>%
+  filter(series != "")
+
+# dropping blank rows
+#wbdt <- wbdt[!is.null(wbdt$series),]
+
+nadt <- wbdt %>% pivot_wider(names_from = series, values_from = stats)
+```
+
+## counting NA's by column
+
+```{r}
+nas <- summary(nadt)
+
+nas <- data.frame(sapply(nadt, function(x) sum(is.na(x))))
+
+nas$cols <- row.names(nas)
+
+colnames(nas) <- c("NA_Count","Cols")
+
+rownames(nas) <- NULL
+
+head(nas)
+tail(nas)
+```
+
+## dropping rows without key variables
+
+*source: <https://bookdown.org/rwnahhas/IntroToR/convert-numeric-to-binary.html>*
+
+```{r}
+#rm(gdp_only, nacat)
+
+gdp_only <- nadt[,c("country", "year", "gdp_constant")]
+
+gdp_only$nacat <- as.numeric(is.na(gdp_only$gdp_constant))
+
+gdp_filtered <- gdp_only[gdp_only$nacat == 0,]
+
+year_filt <- data.frame(table(gdp_filtered$year))
+
+head(year_filt)
+paste("max observations: ", max(year_filt$Freq))
+paste("min observations: ", min(year_filt$Freq))
+
+country_filt <- data.frame(table(gdp_filtered$country))
+
+head(country_filt$Freq)
+paste("max observations: ", max(country_filt$Freq))
+paste("min observations: ", min(country_filt$Freq))
+
+all_filt <- data.frame(table(gdp_filtered$country,gdp_filtered$year))
+
+wbdt_wide <- nadt
+```
+
+*original note*
+The data that came back from the above was weird. It indicated NA's in recent years for big countries so testing again with a similar data set.
+
+*explanation*
+It turns out a mistake earlier in the code led to a mistake loading the error, which has been corrected.  This piece of code was included to highlight the processed and methods used by the team to screen for issues.
+
+```{r}
+
+wdi_econ_only$nacat <- as.numeric(is.na(wdi_econ_only$`GDP (constant 2015 US$) [NY.GDP.MKTP.KD]`))
+
+wdi_econ_only <- wdi_econ_only[,c(1,2,4)]
+
+wdi_gdp_filtered <- wdi_econ_only[wdi_econ_only$nacat == 0,]
+
+wdi_by_year <- data.frame(table(wdi_gdp_filtered$Time))
+```
+
+## spot check - revealing unwanted data points
+```{r}
+#finding highest gdp of all time (adjusted for inflation)
+max(wbdt_wide$gdp_constant, na.rm = TRUE)
+
+check_var <- max(wbdt_wide$gdp_constant, na.rm = TRUE)
+
+#extracting row with highest gdp
+temp<- data.table(wbdt_wide)
+
+temp[gdp_constant == check_var]
+
+rm(temp)
+```
+
+The spot check revealed that global and regional aggregates had been included in the data set. The combined GDP of the earth is quite the outlier.  So the next section removes these rows.
+
+```{r}
+
+#creating list of current vars in country field
+cur_countries <- unique(wbdt_wide$country)
+length(cur_countries) #266
+
+#creating list of new countries from new data set.
+new_countries <- read_csv("country_list_no_regions.csv")
+
+length(new_countries$Country_Name) #217
+
+new_countries <- new_countries[,-1]
+
+#is.data.table(wbdt)
+
+wbdt <- wbdt[country %in% c(new_countries$Country_Name),]
+# sanity check
+#length(unique(wbdt$country))
+#length(unique(wbdt_wide$country))
+
+wbdt_wide <- data.table(wbdt_wide)
+
+wbdt_wide <- wbdt_wide[country %in% c(new_countries$Country_Name),]
+```
+
+## transforming countries to factors
+```{r}
+wbdt$country <- as.factor(wbdt$country)
+class(wbdt$country)
+
+wbdt_wide$country <- as.factor(wbdt_wide$country)
+```
+
+
+## dropping rows without key variables
+
+Dropping rows with NA's in the key variables, which in this case are, gni_constant and gnipc_constant.
+```{r}
+#first getting a new NA count
+
+na_by_col <- wbdt_wide %>% summarise(across(everything(), ~ sum(is.na(.))))
+
+# and the inverse
+vals_by_col <- wbdt_wide %>% summarise(across(everything(), ~ sum(!is.na(.))))
+
+paste(colnames(vals_by_col), ":", vals_by_col)
+
+rm(vals_by_col, na_by_col)
+```
+
+
+```{r}
+# now dropping NAs
+wide_narm <- wbdt_wide[!is.na(gnipc_constant),]
+
+wb_narm <- wbdt[!is.na(stats),]
+```
+
+*str commented out because of space constraints*
+```{r}
+#str(wbdt_wide)
+#str(wb_narm)
+```
+
+## creating data and plot to be used in shiny
+Creating df to be used later in shiny
+```{r}
+objs <- ls()
+
+if("temp" %in% objs){rm(temp)}
+if("data" %in% objs){rm(data)}
+rm(objs)
+
+temp <- wbdt_wide[,!c("country")]
+
+data <- data.table(temp)
+
+# Function to calculate decade
+get_decade <- function(year) {
+  floor(year / 10) * 10
+}
+
+# Add decade column to the data table
+data[, decade := get_decade(year)]
+
+data <- data[, !"year"]
+
+temp <- data[, lapply(.SD, function(x) as.integer(!is.na(x) & !is.nan(x))), .SDcols = -"decade"]
+
+data <- cbind(data$decade, temp)
+
+colnames(data)[1] <- "decade"
+
+#data_aggregated <- data[, lapply(.SD, sum), by = decade]
+
+#
+data_sum <- data[, lapply(.SD, sum), by = decade]
+
+temp <- data[, lapply(.SD, function(x) factor(x)), .SDcols = -"decade"]
+
+data <- cbind(data$decade, temp)
+
+colnames(data)[1] <- "decade"
+
+data_total <- data[, lapply(.SD, length), by = decade]
+
+data_perc <- data_sum/data_total
+data_perc$decade <- data_sum$decade
+
+rm(data, temp)
+```
+
+*A plot using the data above that is used as the basis for shiny GIF*
+```{r}
+temp <- data_perc[,-1]
+
+temp2<- as.numeric(temp[1,])
+
+Values <- matrix(c(temp2,1-temp2), nrow = 2, ncol = 38, byrow = TRUE)
+
+colnames_perc <- colnames(data_perc)
+colnames_perc <- colnames_perc[-1]
+
+colnames(Values) <- colnames_perc
+
+colors = c("green","red")
+
+barplot(Values, main = "Missing Values by Variable -- 1960's", 
+        xlab = "cat", ylab = "percent valid", col = colors, names.arg = colnames(Values))
+
+par(mar = c(8, 4.1, 4.1, 2.1), las=2)
+
+rm(temp,temp2,Values,colnames_perc)
+```
+
+## dropping unneeded df's
+```{r}
+# dropping wdi_econ_only, as its no longer needed
+rm(wdi_econ_only, wdi_gdp_filtered, wdi_by_year, year_filt, nas, nadt, country_filt, all_filt, cols4swap, gdp_only, gdp_filtered, new_countries, i, cur_countries, check_var, colnames_wb1, years, series_list, names_list, summary_wb1)
+```
+
+The remaining columns are wbdt: a long format data set, wbdt_wide: the wide version of wbdt, wb_narm: wbdt where all rows with NA's have been removed (less impactful in this case because each field has its own row), and wide_narm: where only rows with NA's in gnipc_constant have been removed.
+
+# Exploratory Analysis
+
+Here we perform initial analyses and visualizations to get a sense of the data and spot potential issues.
+
+## quick test plots
+```{r}
+par(mfrow = c(1,2))
+
+plot(wbdt_wide$literacy_at, wbdt_wide$gdp_constant/1000000000, ylab = "GDP in Millions (2015 USD)", xlab = "Adult Total Literacy as % of Population")
+
+plot(x = wbdt_wide$literacy_at, y = wbdt_wide$gdppc_constant/1000, ylab = "GDP Per Capita in Thousands (2015 USD)", xlab = "Adult Total Literacy as % of Population")
+```
+The plot seems to have significant outliers making it difficult to read.
+
+```{r}
+# recreating plot, limiting money range to 100/100K min/max
+plot(wide_narm$literacy_at, wide_narm$gdppc_constant, ylab = "GDP Per Capita (2015 USD)", xlab = "Adult Total Literacy as % of Population", ylim = c(100,100000))
+```
+Although somewhat improved, the outliers are still a problem.
+
+```{r}
+# recreating plot, limiting money range to 100/75K min/max
+plot(wide_narm$literacy_at, wide_narm$gdppc_constant, ylab = "GDP Per Capita (2015 USD)", xlab = "Adult Total Literacy as % of Population", ylim = c(100,7500), main = "Y lim set to max $7,500")
+```
+
+
+```{r}
+par(mfrow = c(1,2))
+boxplot(wide_narm$gnipc_constant, ylim = c(0,120000), xlab = "GNI per capita")
+boxplot(wide_narm$gdppc_constant, ylim = c(0,120000), xlab = "GDP per capita")
+```
+box plots of GDP and GNI indicate the same pattern even with limits set on y.
+
+### standardizing data
+Standardizing the data highlights just how far from the norm the outliers are.
+```{r}
+z_wide <- as.data.frame(scale(wide_narm[,!c("country","year")]))
+
+z_wide <- cbind(wide_narm$country,wide_narm$year,z_wide)
+
+colnames(z_wide)[1] <- "country"
+colnames(z_wide)[2] <- "year"
+```
+
+
+```{r}
+plot(z_wide$literacy_at, z_wide$gdppc_constant, ylab = "GDP Per Capita (2015 USD)", xlab = "Adult Total Literacy as % of Population", main = "GDP per capita (standardized)", ylim = c(-1,3))
+
+par(mfrow = c(1,2))
+boxplot(z_wide$gnipc_constant, main = "GNI per capita (standardized)")
+boxplot(z_wide$gdppc_constant, main = "GDP per capita (standardized)")
+```
+
+### regression
+```{r}
+prelim_df <- subset(z_wide, select = -c(gdp_constant, gdp_growth, gdppc_growth, gni_growth,gni_constant, country))
+
+prelim_df1 <- subset(prelim_df, select = -c(gdppc_constant, year))
+
+prelim_df2 <- subset(prelim_df, select = -gnipc_constant)
+
+lm_prelim1 <- lm(gnipc_constant ~., data = prelim_df1)
+
+lm_prelim2 <- lm(gdppc_constant ~., data = prelim_df2)
+
+summary(lm_prelim1)
+#summary(lm_prelim2)
+```
+
+### residuals plots and BP test
+```{r warning=FALSE}
+par(mfrow = c(2,2))
+
+plot(lm_prelim1)
+#plot(lm_prelim2) #results similar to lm_prelim1
+```
+The residuals/fitted plot shows large deviation from linearity to the right. The QQ plot shows light tails, indicating more data at the extremes compared to a normal QQ plot. The residuals vs leverage confirms the presence of significant outliers. The scale location plot is neither horizontal nor evenly spread, indicating heteroskedasticity, however, this wasn't conclusively confirmed by the BP tests below.
+
+```{r}
+
+bptest(lm_prelim1, data = prelim_df1)
+
+bptest(lm_prelim2, data = prelim_df2)
+```
+### multicollinearity checks
+Given the nature of the data some of the variables are guaranteed to suffer from some multicollinearity, for example gdp_growth and gni_growth or literacy and primary education attainment.  The correlation heat-map below explores this.
+
+```{r}
+# creating correlation matrix
+
+multi <- subset(wide_narm, select = -c(country, year))
+
+multi <- drop_na(multi)
+
+corr_mat <- round(cor(multi),2)
+
+# sorting matrix for easier interpretation
+dist <- as.dist((1-corr_mat)/2)
+
+# clustering the dist matrix
+hclust <- hclust(dist)
+corr_mat <- corr_mat[hclust$order, hclust$order]
+
+# reduce the size of correlation matrix
+melted_corr_mat <- reshape2::melt(corr_mat)
+
+#fwrite(melted_corr_mat, "melted_corr_mat.csv")
+
+#plotting the correlation heat-map
+ggplot(data = melted_corr_mat, aes(x = Var1,  y = Var2, fill = value)) +
+  geom_tile() + labs(title = "Correlation Heatmap")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+**Correlation Analysis** 
+
+the heat-map highlights areas of correlation.  This is explored further with the correlation test below.
+```{r}
+cor_test <- cor.test(wide_narm$gni_constant, wide_narm$gdp_constant, use = "complete.obs", method = "pearson")
+print(cor_test)
+```
+**Summary and Explanation of Results**
+
+Cor: The correlation coefficient tells us the strength and direction of the linear relationship between the two variables. our correlation coefficient, 0.9999, indicates a near perfect correlation between GNI and GPD.
+
+P-value: The p-value tests the likelihood the null hypothesis is true (that there is no correlation).Our p-value is way below 0.05, firmly disproving the null hypothesis, which means it's extremely likely that the variables are in fact correlated.
+
+t: This is the t-value, which is used to calculate the p-value that's described above.
+
+df: This is the number of data points used in the cor.test.
+
+95% confidence interval: This means that if we were to run this test 20 times in 19 of them the right answer would fall in the range we've constructed.
+
+In summary, our analysis indicates that there is a very strong positive correlation between GNI and GDP.  This is just one example of the significant multicollinearity that we expected and which is confirmed by the cor.test and the heat-map.  High correlation between predictor variables means they're not truly independent and that without adjustments we are unable to say what portion of the data is explained by one variable vs a correlated one.
+
+# Refined Analysis
+
+### repeating LM test with single year
+
+By using a single year (and ad-ho variable selection) we can explore the data with less multicollinearity and less impact by any time based trend.
+```{r}
+prelim_df <- subset(z_wide, select = -c(gdp_constant, gdp_growth, gdppc_growth, gni_growth,gni_constant, country))
+
+prelim_df1 <- subset(prelim_df, subset = year == 2015, select = -gdppc_constant)
+prelim_df2 <- subset(prelim_df, subset = year == 2015, select = -gnipc_constant)
+
+prelim_df1 <- subset(prelim_df1, select = -year)
+prelim_df2 <- subset(prelim_df2, select = -year)
+
+nas <- data.frame(sapply(prelim_df1, function(x) sum(is.na(x))))
+
+
+prelim_df1 <- data.frame(prelim_df1)
+
+lm_prelim1 <- lm(gdppc_constant ~ edat_us_t, data = prelim_df2)
+lm_prelim2 <- lm(gnipc_constant ~ edat_us_t + edat_us_f + edat_us_m + edat_tert_t, data = prelim_df1)
+
+summary(lm_prelim1)
+summary(lm_prelim2)
+```
+The single year tests suffer from high levels of sparsity.  When only the least sparse variables are selected, some statistically significant effects can be seen (% tertiary educational attainment has a positive relationship with GNI per capita)
+
+## time based analysis
+
+### GNI_pc by year wtih fitted line
+
+```{r}
+plot(wide_narm$year, wide_narm$gnipc_constant, main="GNI per capita by Year", xlab="Year", ylab="GNI PC in constant USD")
+fit <- lm(gnipc_constant ~ year, data = wide_narm)
+abline(fit, col = "red")
+```
+
+### mean GNI and GDP by year
+
+```{r}
+
+by_year <- wide_narm %>%
+  group_by(year) %>%
+  summarise(avg = mean(gni_constant/1000000))
+
+by_year2 <- z_wide %>%
+  group_by(year) %>%
+  summarise(avg = mean(gdp_constant))
+
+par(mfrow = c(1,2))
+
+plot(by_year, ylab = "Constant 2015 USD (in millions)", main = "Avg. GNI")
+plot(by_year2, ylab = "standardized USD", main = "Avg. GDP")
+```
+The plots demonstrate a clear growth in average GDP and GNI over time.  However, a general growth in GDP since the 1960's is essentially guaranteed because of the amount of population growth over the last 60 years.
+
+It should be noted that pure totals also can't be used because of the growth in the number of reporting countries in the world bank data set as seen below.
+
+```{r}
+
+count_byyear <- wide_narm %>% 
+  group_by(year) %>%
+  summarise(across(everything(), ~ sum(!is.na(.))))
+
+plot(count_byyear$year,count_byyear$gni_constant, ylab = "Reporting Countries", main = "count by year", xlab = "year")
+```
+
+### mean GNI and GDP per capita by year
+
+Although total GNI or GDP growth is distorted by the growth in population and reporting countries, per capita means aren't affected.  Per 
+
+```{r}
+
+by_year <- wide_narm %>%
+  group_by(year) %>%
+  summarise(avg = mean(gnipc_constant))
+
+by_year2 <- z_wide %>%
+  group_by(year) %>%
+  summarise(avg = mean(gdppc_constant))
+
+par(mfrow = c(1,2))
+
+plot(by_year, ylab = "Constant 2015 USD", main = "Avg. GNI per capita")
+plot(by_year2, ylab = "standardized USD", main = "Avg. GDP per capita")
+```
+
+When grouped and averaged by year, the data shows a clear upwards trend over time even when accounting for population growth with GDP or GNI per capita.
+
+
+```{r eval=FALSE}
+fwrite(wide_narm, "wide_narm.csv")
+```
+
+# RShiny
+
+### map data for shiny
+The instructions at [Sharp Sight](https://www.sharpsightlabs.com/blog/map-talent-competitiveness/) were helpful in producing the map plot and data.
+```{r}
+# Creating objects with country/map data
+world_map <- map_data('world')
+
+wb_countries <- data.frame(country = unique(wide_narm$country))
+
+# Checking disparities between world bank country names and world_map names.
+anti_join(wb_countries, world_map, by = c('country' = 'region'))
+
+# printing list of country names in wold_map
+world_map %>%
+  group_by(region) %>%
+  summarise() %>%
+  print(n = Inf)
+
+# recoding names
+wide_narm <- wide_narm %>%  mutate(country = recode(
+  country,
+  `Antigua and Barbuda` = 'Antigua',
+  `Bahamas, The` = 'Bahamas',
+  `Brunei Darussalam` = 'Brunei',
+  `Cabo Verde` = 'Cape Verde',
+  `Congo, Dem. Rep.` = 'Democratic Republic of the Congo',
+  `Congo, Rep.` = 'Republic of Congo',
+  `Cote d'Ivoire` = 'Ivory Coast',
+  `Czechia` = 'Czech Republic',
+  `Egypt, Arab Rep.` = 'Egypt',
+  `Eswatini` = 'Swaziland',
+  `Gambia, The` = 'Gambia',
+  `Iran, Islamic Rep.` = 'Iran',
+  `Korea, Rep.` = 'South Korea',
+  `Kyrgyz Republic` = 'Kyrgyzstan',
+  `Lao PDR` = 'Lao',
+  `Micronesia, Fed. Sts.` = 'Micronesia',
+  `Russian Federation` = 'Russia',
+  `Sint Maarten (Dutch part)` = 'Saint Martin',
+  `Slovak Republic` = 'Slovakia',
+  `St. Kitts and Nevis` = 'Saint Kitts',
+  `St. Lucia` = 'Saint Lucia',
+  `St. Vincent and the Grenadines` = 'Saint Vincent',
+  `Syrian Arab Republic` = 'Syria',
+  `Trinidad and Tobago` = 'Trinidad',
+  `Turkiye` = 'Turkey',
+  `United Kingdom` = 'UK',
+  `United States` = 'USA',
+  `West Bank and Gaza` = 'Palestine',
+  `Yemen, Rep.` = 'Yemen',
+)
+)
+
+# creating test plot
+
+world_plot <- ggplot() +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group), fill = "lightgray", color = "black") +
+  geom_polygon(data = subset(world_map, region == "USA"), aes(x = long, y = lat, group = group), fill = "blue", color = "black") +
+  coord_equal() +
+  labs(title = "World Map")+xlab(NULL)+ylab(NULL)
+
+world_plot
+```
+
+## full RShiny code
+```{r eval=FALSE, include=TRUE}
+library(pacman)
+
+pacman::p_load(readr, dplyr, tidyverse, data.table, knitr, lmtest, lubridate, ggplot2, gridExtra, shiny, sf, ggmap, maps, cowplot)
+
+library(mapdata)
+
+wide_narm <- fread("wide_narm.csv")
+
+if(!is.data.table(wide_narm)){wide_narm <- data.table(wide_narm)}
+
+wide_narm$country <- as.factor(wide_narm$country)
+
+df <- subset(wide_narm, select = -country)
+
+world_map <- map_data("world")
+
+prelim_df1 <- fread("prelim_df1.csv")
+
+lm_prelim1 <- lm(prelim_df1$gnipc_constant ~., data = prelim_df1)
+
+melted_corr_mat <- fread("melted_corr_mat.csv")
+
+#world_map <- left_join( world_map, wb_countries, by = c('region' = 'country')) 
+
+# Group data by decade
+df_decade <- df %>%
+  mutate(decade = 10 * floor(year / 10))
+
+ui <- fluidPage(
+  
+  fluidRow(
+        titlePanel(
+          h1("World Bank Project"
+          ))
+  ),
+  fluidRow(
+    titlePanel(h3("Group: Nick McCulloch, Cody Meagher, Stefano Mesetti"
+    ))
+  ),
+  
+  hr(),
+  
+  fluidRow(
+    titlePanel(
+      h3("Dataset Limitations"
+      )),
+    #sidebarLayout(
+    #sidebarPanel(),
+    #mainPanel(
+      img(src="gif.gif", align = "left",height='450px',width='900px')
+  #),
+    #)
+  ),
+  
+  fluidRow(
+    sidebarLayout(
+    sidebarPanel(
+      numericInput("residual_var",
+                   "Residual/Multicollinearity Plots:", min = 1, max = 6, value = 1, step = 1)),
+    mainPanel(
+      plotOutput("residual_plot")
+    ),
+    )
+  ),
+  
+  hr(),
+  
+  fluidRow(
+    titlePanel(
+      h3("Interpretation"
+      )),
+  ),
+  
+  fluidRow(
+    sidebarLayout(
+      sidebarPanel(
+        sliderInput(
+          "decade_slider",
+          "Decade:",
+          min = 1960,
+          max = 2020,
+          value = 2010,
+          step = 10
+        ),
+        
+        varSelectInput("scatter_varX","select x variable",df, selected = "literacy_at"),
+        varSelectInput("scatter_varY","select y variable",df, selected = "gnipc_constant"),
+        checkboxInput("smooth", "Add Regression Line", value = FALSE),
+        sliderInput(
+          "y_lim_slider",
+          "Max Income:",
+          min = 1000,
+          max = 200000,
+          value = 75000,
+          step = 1000
+        ),
+      ),
+      mainPanel(
+        plotOutput("scatter_plot")
+      ))
+  ),
+  
+  hr(),
+  
+  fluidRow(
+    titlePanel("GNI and GDP Analysis"),
+    
+    sidebarLayout(
+      sidebarPanel(
+        selectInput("country", 
+                    label = "Choose a country",
+                    choices = unique(wide_narm$country),
+                    selected = "South Africa"
+        )
+      ),
+      
+      mainPanel(
+        tabsetPanel(type = "tabs",
+                    tabPanel("GNI and GDP Over Time", 
+                             plotOutput("timePlot"),
+                             plotOutput("countryplot"))
+        )
+      )
+    )
+  ),
+  fluidRow(
+    
+  ),
+  fluidRow(
+  )
+)
+
+server <- function(input, output) {
+  output$residual_plot <- renderPlot({
+    if(input$residual_var < 6) {
+      plot(lm_prelim1, which = input$residual_var)
+    } else {
+      ggplot(data = melted_corr_mat, aes(x = Var1,  y = Var2, fill = value)) +
+        geom_tile() + labs(title = "Correlation Heatmap")+
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+    }
+  })
+  
+  filtered_data <- reactive({
+    df_decade[df_decade$decade == input$decade_slider,]
+  })
+  
+  output$scatter_plot <- renderPlot({
+    ggplot(filtered_data(), aes(
+      x = !!input$scatter_varX, 
+      y = !!input$scatter_varY)) +
+      geom_point() +
+      ggtitle("Scatter Plot (Grouped by Decade)") +
+      xlim(0, 100) + ylim(0, input$y_lim_slider) +
+      theme_minimal() +
+      if(input$smooth) {geom_smooth()}
+  })
+  
+  currentData <- reactive({input$country
+  })
+  
+  output$timePlot <- renderPlot({
+    data <- wide_narm[wide_narm$country == input$country, ]
+    
+    gdp <- ggplot(data, aes(x = year, y = gdppc_constant)) +
+      geom_line() +
+      ggtitle(paste("GDP per capita Over Time for", input$country)) +
+      ylab("GDP") + xlab("Year")
+    
+    gni <- ggplot(data, aes(x = year, y = gnipc_constant)) +
+      geom_line() +
+      ggtitle(paste("GNI per capita Over Time for", input$country)) +
+      ylab("GNI") + xlab("Year")
+    
+    world_plot <- ggplot() +
+      geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+                   fill = ifelse(world_map$region == input$country, "red", "lightgray"),
+                   color = "black") +
+      coord_equal() +
+      labs(title = "World Map") + xlab(NULL) + ylab(NULL) +
+      theme_light()
+    
+    # Adjust plot size by specifying dimensions in plotOutput
+    plot_grid(gdp, gni, world_plot, ncol = 1, rel_heights = c(2, 2, 3.5))
+  }, height = 800)  # Specify desired height for the plot
+  
+  }
+
+
+shinyApp(ui, server)
+```

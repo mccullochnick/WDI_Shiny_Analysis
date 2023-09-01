@@ -628,6 +628,7 @@ fwrite(wide_narm, "wide_narm.csv")
 ```
 
 # RShiny
+A shiny app for the project was created using the code below and can be found [here](https://nickmcculloch.shinyapps.io/world_bank_project/).
 
 ### map data for shiny
 The instructions at [Sharp Sight](https://www.sharpsightlabs.com/blog/map-talent-competitiveness/) were helpful in producing the map plot and data.
@@ -696,7 +697,7 @@ world_plot
 ```{r eval=FALSE, include=TRUE}
 library(pacman)
 
-pacman::p_load(readr, dplyr, tidyverse, data.table, knitr, lmtest, lubridate, ggplot2, gridExtra, shiny, sf, ggmap, maps, cowplot)
+pacman::p_load(shinythemes, readr, dplyr, tidyverse, data.table, knitr, lmtest, lubridate, ggplot2, gridExtra, shiny, sf, ggmap, maps, cowplot)
 
 library(mapdata)
 
@@ -716,43 +717,59 @@ lm_prelim1 <- lm(prelim_df1$gnipc_constant ~., data = prelim_df1)
 
 melted_corr_mat <- fread("melted_corr_mat.csv")
 
-#world_map <- left_join( world_map, wb_countries, by = c('region' = 'country')) 
-
 # Group data by decade
 df_decade <- df %>%
   mutate(decade = 10 * floor(year / 10))
 
-ui <- fluidPage(
-  
+resNum <- c(1,2,3,4,5,6)
+resName <- c("Residuals vs Fitted",
+             "Normal Q-Q",
+             "Scale-Location",
+             "Cook's Distance",
+             "Residuals vs Leverage",
+             "Correlation Heatmap")
+residual_list <- setNames(as.list(resNum), resName)
+
+ui <- fluidPage(theme = shinythemes::shinytheme("superhero"),
+  titlePanel("World Bank Project"), 
   fluidRow(
-        titlePanel(
-          h1("World Bank Project"
-          ))
-  ),
-  fluidRow(
-    titlePanel(h3("Group: Nick McCulloch, Cody Meagher, Stefano Mesetti"
+    mainPanel(h4("Group: Nick McCulloch, Cody Meagher, Stefano Mesetti"
     ))
   ),
   
   hr(),
   
+  
   fluidRow(
-    titlePanel(
-      h3("Dataset Limitations"
+    mainPanel(
+      h4("Introduction"),),
+    mainPanel("This project examined education and economic data from
+              the World Bank's Development Indicator's Database. 
+              The Database contains information by country, year, and topic, 
+              covering everything from healthcare to criminal justice 
+              and every year from 1960 to the present.")
+    ),
+  
+  fluidRow(
+    mainPanel(
+      h4("Data Limitations"
       )),
-    #sidebarLayout(
-    #sidebarPanel(),
-    #mainPanel(
+    mainPanel("As can be seen the dataset was notably sparse."),
       img(src="gif.gif", align = "left",height='450px',width='900px')
-  #),
-    #)
   ),
+
+  hr(),
   
   fluidRow(
     sidebarLayout(
     sidebarPanel(
-      numericInput("residual_var",
-                   "Residual/Multicollinearity Plots:", min = 1, max = 6, value = 1, step = 1)),
+      selectInput("residual_var", 
+                  label = "Select plot",
+                  choices = c(resName),
+                  selected = "Residuals vs Leverage"
+      )
+      ),
+    
     mainPanel(
       plotOutput("residual_plot")
     ),
@@ -762,8 +779,8 @@ ui <- fluidPage(
   hr(),
   
   fluidRow(
-    titlePanel(
-      h3("Interpretation"
+    mainPanel(
+      h4("Ed and Econ Plots"
       )),
   ),
   
@@ -799,10 +816,9 @@ ui <- fluidPage(
   hr(),
   
   fluidRow(
-    titlePanel("GNI and GDP Analysis"),
-    
-    sidebarLayout(
-      sidebarPanel(
+    mainPanel(h4("GNI and GDP Over Time"))),
+  fluidRow(
+      mainPanel(
         selectInput("country", 
                     label = "Choose a country",
                     choices = unique(wide_narm$country),
@@ -811,25 +827,15 @@ ui <- fluidPage(
       ),
       
       mainPanel(
-        tabsetPanel(type = "tabs",
-                    tabPanel("GNI and GDP Over Time", 
                              plotOutput("timePlot"),
                              plotOutput("countryplot"))
         )
-      )
-    )
-  ),
-  fluidRow(
-    
-  ),
-  fluidRow(
-  )
 )
 
 server <- function(input, output) {
   output$residual_plot <- renderPlot({
-    if(input$residual_var < 6) {
-      plot(lm_prelim1, which = input$residual_var)
+    if(residual_list[[input$residual_var]] != 6) {
+      plot(lm_prelim1, which = residual_list[[input$residual_var]])
     } else {
       ggplot(data = melted_corr_mat, aes(x = Var1,  y = Var2, fill = value)) +
         geom_tile() + labs(title = "Correlation Heatmap")+
@@ -876,12 +882,10 @@ server <- function(input, output) {
       labs(title = "World Map") + xlab(NULL) + ylab(NULL) +
       theme_light()
     
-    # Adjust plot size by specifying dimensions in plotOutput
     plot_grid(gdp, gni, world_plot, ncol = 1, rel_heights = c(2, 2, 3.5))
-  }, height = 800)  # Specify desired height for the plot
+  }, height = 800)
   
   }
-
 
 shinyApp(ui, server)
 ```
